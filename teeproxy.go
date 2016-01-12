@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -20,6 +21,7 @@ var (
 	debug             = flag.Bool("debug", false, "more logging, showing ignored output")
 	productionTimeout = flag.Int("a.timeout", 3, "timeout in seconds for production traffic")
 	alternateTimeout  = flag.Int("b.timeout", 1, "timeout in seconds for alternate site traffic")
+	percent           = flag.Int("p", 100, "percentage of traffic to send to testing.")
 )
 
 // handler contains the address of the main Target and the one for the Alternative target
@@ -30,7 +32,8 @@ type handler struct {
 
 // ServeHTTP duplicates the incoming request (req) and does the request to the Target and the Alternate target discading the Alternate response
 func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	req1, req2 := DuplicateRequest(req)
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	req1, req2 := DuplicateRequest(req, r)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && *debug {
@@ -38,28 +41,30 @@ func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}()
 		// Open new TCP connection to the server
-		clientTcpConn, err := net.DialTimeout("tcp", h.Alternative, time.Duration(time.Duration(*alternateTimeout)*time.Second))
-		if err != nil {
-			if *debug {
-				fmt.Printf("Failed to connect to %s\n", h.Alternative)
+		if req1 != nil {
+			clientTcpConn, err := net.DialTimeout("tcp", h.Alternative, time.Duration(time.Duration(*alternateTimeout)*time.Second))
+			if err != nil {
+				if *debug {
+					fmt.Printf("Failed to connect to %s\n", h.Alternative)
+				}
+				return
 			}
-			return
-		}
-		clientHttpConn := httputil.NewClientConn(clientTcpConn, nil) // Start a new HTTP connection on it
-		defer clientHttpConn.Close()                                 // Close the connection to the server
-		err = clientHttpConn.Write(req1)                             // Pass on the request
-		if err != nil {
-			if *debug {
-				fmt.Printf("Failed to send to %s: %v\n", h.Alternative, err)
+			clientHttpConn := httputil.NewClientConn(clientTcpConn, nil) // Start a new HTTP connection on it
+			defer clientHttpConn.Close()                                 // Close the connection to the server
+			err = clientHttpConn.Write(req1)                             // Pass on the request
+			if err != nil {
+				if *debug {
+					fmt.Printf("Failed to send to %s: %v\n", h.Alternative, err)
+				}
+				return
 			}
-			return
-		}
-		_, err = clientHttpConn.Read(req1) // Read back the reply
-		if err != nil {
-			if *debug {
-				fmt.Printf("Failed to receive from %s: %v\n", h.Alternative, err)
+			_, err = clientHttpConn.Read(req1) // Read back the reply
+			if err != nil {
+				if *debug {
+					fmt.Printf("Failed to receive from %s: %v\n", h.Alternative, err)
+				}
+				return
 			}
-			return
 		}
 	}()
 	defer func() {
@@ -112,22 +117,26 @@ type nopCloser struct {
 
 func (nopCloser) Close() error { return nil }
 
-func DuplicateRequest(request *http.Request) (request1 *http.Request, request2 *http.Request) {
+func DuplicateRequest(request *http.Request, r *rand.Rand) (request1 *http.Request, request2 *http.Request) {
 	b1 := new(bytes.Buffer)
 	b2 := new(bytes.Buffer)
 	w := io.MultiWriter(b1, b2)
 	io.Copy(w, request.Body)
 	defer request.Body.Close()
-	request1 = &http.Request{
-		Method:        request.Method,
-		URL:           request.URL,
-		Proto:         "HTTP/1.1",
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Header:        request.Header,
-		Body:          nopCloser{b1},
-		Host:          request.Host,
-		ContentLength: request.ContentLength,
+	if r.Int31n(100) <= int32(*percent) {
+		request1 = &http.Request{
+			Method:        request.Method,
+			URL:           request.URL,
+			Proto:         "HTTP/1.1",
+			ProtoMajor:    1,
+			ProtoMinor:    1,
+			Header:        request.Header,
+			Body:          nopCloser{b1},
+			Host:          request.Host,
+			ContentLength: request.ContentLength,
+		}
+	} else {
+		request1 = nil
 	}
 	request2 = &http.Request{
 		Method:        request.Method,
