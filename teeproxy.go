@@ -28,12 +28,12 @@ var (
 type handler struct {
 	Target      string
 	Alternative string
+	Randomizer  rand.Rand
 }
 
 // ServeHTTP duplicates the incoming request (req) and does the request to the Target and the Alternate target discading the Alternate response
 func (h handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	req1, req2 := DuplicateRequest(req, r)
+	req1, req2 := DuplicateRequest(req, &h.Randomizer)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && *debug {
@@ -107,6 +107,7 @@ func main() {
 	h := handler{
 		Target:      *targetProduction,
 		Alternative: *altTarget,
+		Randomizer:  *rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	http.Serve(local, h)
 }
